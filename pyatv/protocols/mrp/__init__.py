@@ -517,6 +517,19 @@ class MrpMetadata(Metadata):
         default size. Set one of them and let the other one be None to keep original
         aspect ratio.
         """
+        # Enrich metadata with external artwork URL if not already present.
+        # The content resolver injects artworkURL into the protobuf metadata
+        # so _fetch_remote_artwork can download it.
+        state = self.psm.playing
+        if (
+            state.metadata
+            and not state.metadata.HasField("artworkURL")
+            and not state.metadata.HasField("artworkIdentifier")
+            and state.metadata.HasField("contentIdentifier")
+            and self.psm.client
+        ):
+            await self._resolve_external_content(state)
+
         identifier = self.artwork_id
         if not identifier:
             _LOGGER.debug("No artwork available")
@@ -606,7 +619,11 @@ class MrpMetadata(Metadata):
     def artwork_id(self):
         """Return a unique identifier for current artwork."""
         metadata = self.psm.playing.metadata
-        if metadata and (metadata.artworkAvailable or metadata.HasField("artworkURL")):
+        if metadata and (
+            metadata.artworkAvailable
+            or metadata.HasField("artworkURL")
+            or metadata.HasField("contentIdentifier")
+        ):
             if metadata.HasField("artworkIdentifier"):
                 return metadata.artworkIdentifier
             if metadata.HasField("contentIdentifier"):
