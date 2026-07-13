@@ -7,7 +7,6 @@ import re
 import socket
 from typing import Dict, Mapping, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlsplit
-import uuid
 from xml.etree import ElementTree
 
 from aiohttp import ClientError, ClientSession
@@ -41,6 +40,7 @@ _LOUNGE_ID_HEADER = "X-YouTube-LoungeId-Token"
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _SID = re.compile(r'\["c","([^"]+)","')
 _GSESSION_ID = re.compile(r'\["S","([^"]+)"\]')
+_EVENT_ID = re.compile(r"\[(\d+),\[")
 
 
 def video_id_from_url(value: str) -> Optional[str]:
@@ -80,8 +80,15 @@ async def play_video(
         app_url = await _discover_youtube_app_url(loop, session, address)
         screen_id = await _get_screen_id(session, app_url)
         lounge_token = await _get_lounge_token(session, screen_id)
-        sid, gsession_id = await _bind(session, lounge_token)
-        await _set_playlist(session, lounge_token, sid, gsession_id, video_id)
+        sid, gsession_id, last_event_id = await _bind(session, lounge_token, screen_id)
+        await _set_playlist(
+            session,
+            lounge_token,
+            sid,
+            gsession_id,
+            last_event_id,
+            video_id,
+        )
     except exceptions.ProtocolError:
         raise
     except Exception as ex:
@@ -196,19 +203,33 @@ def _lounge_headers(lounge_token: str) -> Mapping[str, str]:
     }
 
 
-async def _bind(session: ClientSession, lounge_token: str) -> Tuple[str, str]:
-    controller_id = uuid.uuid4().hex[:26]
+async def _bind(
+    session: ClientSession, lounge_token: str, screen_id: str
+) -> Tuple[str, str, int]:
     data = {
+        "app": "web",
+        "capabilities": "que,dsdtr,atp,vsp",
         "device": "REMOTE_CONTROL",
-        "id": controller_id,
+        "deviceContext": (
+            "user_agent=pyatv&window_width_points=&window_height_points="
+            "&os_name=python&ms="
+        ),
+        "id": screen_id,
+        "loungeIdToken": lounge_token,
+        "magnaKey": "cloudPairedDevice",
         "name": "pyatv",
         "mdx-version": "3",
-        "pairing_type": "cast",
-        "app": "android-phone-13.14.55",
+        "theme": "cl",
+        "ui": "false",
     }
     async with session.post(
         _BIND_URL,
-        params={"RID": "0", "VER": "8", "CVER": "1"},
+        params={
+            "RID": "1",
+            "VER": "8",
+            "CVER": "1",
+            "auth_failure_option": "send_error",
+        },
         headers=_lounge_headers(lounge_token),
         data=data,
     ) as response:
@@ -217,9 +238,10 @@ async def _bind(session: ClientSession, lounge_token: str) -> Tuple[str, str]:
 
     sid = _SID.search(payload)
     gsession_id = _GSESSION_ID.search(payload)
-    if not sid or not gsession_id:
+    event_ids = [int(event_id) for event_id in _EVENT_ID.findall(payload)]
+    if not sid or not gsession_id or not event_ids:
         raise exceptions.ProtocolError("Could not bind to YouTube lounge session")
-    return sid.group(1), gsession_id.group(1)
+    return sid.group(1), gsession_id.group(1), max(event_ids)
 
 
 async def _set_playlist(
@@ -227,23 +249,26 @@ async def _set_playlist(
     lounge_token: str,
     sid: str,
     gsession_id: str,
+    last_event_id: int,
     video_id: str,
 ) -> None:
     data = {
-        "req0_listId": "",
-        "req0__sc": "setPlaylist",
-        "req0_currentTime": "0",
-        "req0_currentIndex": "-1",
-        "req0_audioOnly": "false",
-        "req0_videoId": video_id,
         "count": "1",
+        "ofs": "1",
+        "req0__sc": "setPlaylist",
+        "req0_videoId": video_id,
     }
     params = {
+        "name": "pyatv",
+        "loungeIdToken": lounge_token,
         "SID": sid,
+        "AID": str(last_event_id),
         "gsessionid": gsession_id,
-        "RID": "1",
+        "device": "REMOTE_CONTROL",
+        "app": "youtube-desktop",
+        "RID": "2",
         "VER": "8",
-        "CVER": "1",
+        "v": "2",
     }
     async with session.post(
         _BIND_URL,

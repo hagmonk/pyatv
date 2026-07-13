@@ -105,7 +105,11 @@ async def test_play_video(aiohttp_server, monkeypatch):
         )
         if len([call for call in calls if call[0] == "bind"]) == 1:
             return web.Response(
-                text='[[0,["c","test-sid","",8]],[1,["S","test-gsession"]]]'
+                text=(
+                    '[[0,["c","test-sid","",8]],'
+                    '[1,["S","test-gsession"]],'
+                    '[5,["loungeStatus",{}]]]'
+                )
             )
         return web.Response(text="ok")
 
@@ -129,24 +133,34 @@ async def test_play_video(aiohttp_server, monkeypatch):
 
     assert calls[0] == ("token", {"screen_ids": "test-screen"})
     bind = calls[1]
-    assert bind[1] == {"RID": "0", "VER": "8", "CVER": "1"}
-    assert bind[2]["device"] == "REMOTE_CONTROL"
-    assert bind[3] == "token"
-    playlist = calls[2]
-    assert playlist[1] == {
-        "SID": "test-sid",
-        "gsessionid": "test-gsession",
+    assert bind[1] == {
         "RID": "1",
         "VER": "8",
         "CVER": "1",
+        "auth_failure_option": "send_error",
+    }
+    assert bind[2]["device"] == "REMOTE_CONTROL"
+    assert bind[2]["id"] == "test-screen"
+    assert bind[2]["loungeIdToken"] == "token"
+    assert bind[2]["magnaKey"] == "cloudPairedDevice"
+    assert bind[3] == "token"
+    playlist = calls[2]
+    assert playlist[1] == {
+        "name": "pyatv",
+        "loungeIdToken": "token",
+        "SID": "test-sid",
+        "AID": "5",
+        "gsessionid": "test-gsession",
+        "device": "REMOTE_CONTROL",
+        "app": "youtube-desktop",
+        "RID": "2",
+        "VER": "8",
+        "v": "2",
     }
     assert playlist[2] == {
-        "req0_listId": "",
-        "req0__sc": "setPlaylist",
-        "req0_currentTime": "0",
-        "req0_currentIndex": "-1",
-        "req0_audioOnly": "false",
-        "req0_videoId": "jNQXAC9IVRw",
         "count": "1",
+        "ofs": "1",
+        "req0__sc": "setPlaylist",
+        "req0_videoId": "jNQXAC9IVRw",
     }
     assert playlist[3] == "token"
