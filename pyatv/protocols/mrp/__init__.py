@@ -1044,7 +1044,11 @@ class MrpFeatures(Features):
             return FeatureInfo(state=FeatureState.Available)
         if feature_name == FeatureName.Artwork:
             metadata = self.psm.playing.metadata
-            if metadata and metadata.artworkAvailable:
+            if metadata and (
+                metadata.artworkAvailable
+                or metadata.HasField("artworkURL")
+                or metadata.HasField("contentIdentifier")
+            ):
                 return FeatureInfo(state=FeatureState.Available)
             return FeatureInfo(state=FeatureState.Unavailable)
 
