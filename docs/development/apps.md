@@ -49,6 +49,13 @@ Here are some known working examples:
 * https://www.disneyplus.com/series/the-beatles-get-back/7DcWEeWVqrkE
 * https://play.hbomax.com/page/urn:hbo:page:GXkRjxwjR68PDwwEAABKJ:type:series
 * https://www.netflix.com/title/80234304
+* https://www.youtube.com/watch?v=jNQXAC9IVRw
+
+YouTube is a special case. Its current tvOS app accepts the `youtube` URL scheme
+but does not reliably route the URL to the requested video. For supported
+YouTube video URLs, pyatv launches the YouTube app and then starts the video via
+the app's DIAL/YouTube Lounge receiver. This fallback currently requires the
+Apple TV to have an IPv4 address reachable from the pyatv host.
 
 The simplest way to find useful deep links is to use the "Share" feature in iOS or macOS versions of the App. Share 
 sheets will often have a "Copy" or "Copy link" feature. For apps that have a web accessible version, links copied from

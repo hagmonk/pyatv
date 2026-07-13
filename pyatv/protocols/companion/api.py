@@ -13,7 +13,7 @@ from pyatv.auth.hap_srp import SRPAuthHandler
 from pyatv.const import InputAction, TouchAction
 from pyatv.core import Core
 from pyatv.core.protocol import MessageDispatcher
-from pyatv.protocols.companion import keyed_archiver
+from pyatv.protocols.companion import keyed_archiver, youtube
 from pyatv.protocols.companion.connection import CompanionConnection, FrameType
 from pyatv.protocols.companion.plist_payloads import (
     get_rti_clear_text_payload,
@@ -278,6 +278,22 @@ class CompanionAPI(
 
     async def launch_app(self, bundle_identifier_or_url: str) -> None:
         """Launch an app on the remote device."""
+        youtube_video_id = youtube.video_id_from_url(bundle_identifier_or_url)
+        if youtube_video_id:
+            await self._send_command(
+                "_launchApp",
+                {
+                    "_bundleID": youtube.YOUTUBE_BUNDLE_ID,
+                },
+            )
+            await youtube.play_video(
+                self.core.loop,
+                self.core.session_manager.session,
+                str(self.core.config.address),
+                youtube_video_id,
+            )
+            return
+
         launch_command_key = (
             "_urlS" if is_url_or_scheme(bundle_identifier_or_url) else "_bundleID"
         )

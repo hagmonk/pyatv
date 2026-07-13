@@ -18,6 +18,7 @@ from pyatv.const import (
 )
 from pyatv.interface import App, FeatureName, FeatureState, UserAccount
 from pyatv.protocols.companion.api import SystemStatus
+from pyatv.protocols.companion.youtube import YOUTUBE_BUNDLE_ID
 
 from tests.fake_device.companion import (
     INITIAL_DURATION,
@@ -91,6 +92,23 @@ async def test_launch_app(companion_client, companion_state):
 async def test_launch_app_with_url(companion_client, companion_state):
     await companion_client.apps.launch_app(TEST_APP_URL)
     await until(lambda: companion_state.open_url == TEST_APP_URL)
+
+
+async def test_launch_youtube_video(companion_client, companion_state, monkeypatch):
+    calls = []
+
+    async def play_video(loop, session, address, video_id):
+        calls.append((loop, session, address, video_id))
+
+    monkeypatch.setattr("pyatv.protocols.companion.api.youtube.play_video", play_video)
+
+    await companion_client.apps.launch_app(
+        "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    )
+    await until(lambda: companion_state.active_app == YOUTUBE_BUNDLE_ID)
+
+    assert len(calls) == 1
+    assert calls[0][2:] == ("127.0.0.1", "jNQXAC9IVRw")
 
 
 async def test_app_list(companion_client, companion_usecase):
