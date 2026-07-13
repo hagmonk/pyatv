@@ -158,14 +158,12 @@ def _cocoa_to_timestamp(time):
 def build_playing_instance(  # pylint: disable=too-many-locals
     state: PlayerState,
 ) -> Playing:
-    """Build a Playing instance from play state."""
+    """Build a Playing instance from play state.
 
-    # tvOS 26.5: decode nowPlayingInfoData bplist for missing metadata
-    # fields (e.g. seriesName, seasonNumber, episodeNumber) that some
-    # apps put in the NSKeyedArchive instead of structured protobuf fields.
-    from pyatv.protocols.mrp.npid_decoder import enrich_metadata
-
-    enrich_metadata(state.metadata)
+    Metadata enrichment (bplist decoding and external content resolution)
+    is performed by the caller in MrpMetadata.playing() before calling
+    this function.
+    """
 
     def media_type() -> MediaType:
         """Type of media is currently playing, e.g. video, music."""
@@ -618,7 +616,54 @@ class MrpMetadata(Metadata):
 
     async def playing(self) -> Playing:
         """Return what is currently playing."""
-        return build_playing_instance(self.psm.playing)
+        state = self.psm.playing
+
+        # tvOS 26.5: decode nowPlayingInfoData bplist for missing fields
+        from pyatv.protocols.mrp.npid_decoder import enrich_metadata
+
+        enrich_metadata(state.metadata)
+
+        # If series_name is still missing, try external content resolvers
+        # (e.g. Peacock sitemap lookup) keyed by the app's bundle ID and
+        # the contentIdentifier from the MRP metadata.
+        if (
+            state.metadata
+            and not state.metadata.HasField("seriesName")
+            and state.metadata.HasField("contentIdentifier")
+            and self.psm.client
+        ):
+            await self._resolve_external_content(state)
+
+        return build_playing_instance(state)
+
+    async def _resolve_external_content(self, state: PlayerState) -> None:
+        """Look up missing metadata from external content resolvers."""
+        from pyatv.protocols.mrp.content_resolvers import (
+            PeacockResolver,
+            ResolverRegistry,
+        )
+
+        if not hasattr(self, "_resolver_registry"):
+            self._resolver_registry = ResolverRegistry()
+            peacock = PeacockResolver()
+            peacock.set_client_session(self.client_session)
+            self._resolver_registry.register(peacock)
+
+        bundle_id = self.psm.client.bundle_identifier
+        content_id = state.metadata.contentIdentifier
+
+        result = await self._resolver_registry.resolve(bundle_id, content_id)
+        if result is None:
+            return
+
+        if result.series_name and not state.metadata.HasField("seriesName"):
+            state.metadata.seriesName = result.series_name
+        if result.season_number is not None and not state.metadata.HasField("seasonNumber"):
+            state.metadata.seasonNumber = result.season_number
+        if result.episode_number is not None and not state.metadata.HasField("episodeNumber"):
+            state.metadata.episodeNumber = result.episode_number
+        if result.artwork_url and not state.metadata.HasField("artworkURL"):
+            state.metadata.artworkURL = result.artwork_url
 
     @property
     def app(self) -> Optional[App]:
