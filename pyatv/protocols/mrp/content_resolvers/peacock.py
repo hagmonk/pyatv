@@ -1,9 +1,15 @@
 """Peacock content resolver using public sitemaps and show pages.
 
-Peacock's public sitemaps at peacocktv.com list every episode URL with
+Peacock's public catalog API can look up an episode directly from the
+providerVariantId reported by MRP. It returns the show, season, episode,
+and image URL, including for newly published episodes that have not reached
+the public sitemaps yet.
+
+The public sitemaps at peacocktv.com also list episode URLs with
 the format:
 
-    /watch-online/tv/{show-slug}/{series-id}/seasons/{season}/episodes/{episode-slug}/{episode-uuid}
+    /watch-online/tv/{show-slug}/{series-id}/seasons/{season}/episodes/
+        {episode-slug}/{episode-uuid}
 
 The episode-uuid in the URL is the same contentIdentifier that Peacock
 reports via MRP. By downloading and indexing the sitemaps, we can map
@@ -15,8 +21,8 @@ image URL format is:
 
     https://imageservice.disco.peacocktv.com/uuid/{image-uuid}/{format}?language=eng&proposition=NBCUOTT
 
-The sitemap lookup is fast (in-memory after initial load). Artwork
-fetching is lazy — only when a show page hasn't been cached yet.
+The catalog lookup is the primary path. The sitemap and show-page lookup is
+retained as a fallback.
 
 The sitemaps are:
     https://www.peacocktv.com/sitemap-content_page_entertainment_us-{0..6}.xml
@@ -25,11 +31,10 @@ The sitemaps are:
 """
 
 import asyncio
-import json
 import logging
 import re
-import xml.etree.ElementTree as ET
 from typing import Dict, Optional
+import xml.etree.ElementTree as ET
 
 from .base import ContentResolver, ContentResult
 
@@ -40,6 +45,15 @@ _PEACOCK_BUNDLE_IDS = {
     "com.peacocktv.peacocktv",
 }
 
+_CATALOG_VARIANT_URL = (
+    "https://atom.peacocktv.com/adapter-calypso/v3/query/node/"
+    "provider_variant_id/{content_identifier}"
+)
+_CATALOG_HEADERS = {
+    "X-SkyOTT-Proposition": "NBCUOTT",
+    "X-SkyOTT-Territory": "US",
+}
+
 _SITEMAP_ENTERTAINMENT_PATTERN = (
     "https://www.peacocktv.com/sitemap-content_page_entertainment_us-{i}.xml"
 )
@@ -48,7 +62,10 @@ _NUM_ENTERTAINMENT_SITEMAPS = 7
 
 _SHOW_PAGE_URL = "https://www.peacocktv.com/stream-tv/{slug}"
 
-_IMAGE_SERVICE_BASE = "https://imageservice.disco.peacocktv.com/uuid/{image_uuid}/{format}?language=eng&proposition=NBCUOTT"
+_IMAGE_SERVICE_BASE = (
+    "https://imageservice.disco.peacocktv.com/uuid/{image_uuid}/{format}"
+    "?language=eng&proposition=NBCUOTT"
+)
 
 # URL pattern: /watch-online/tv/{slug}/{id}/seasons/{season}/episodes/{ep-slug}/{uuid}
 _EPISODE_RE = re.compile(
@@ -56,15 +73,69 @@ _EPISODE_RE = re.compile(
 )
 
 # URL pattern: /watch-online/movie/{slug}/{id}/{uuid}
-_MOVIE_RE = re.compile(
-    r"/watch-online/movie/([^/]+)/(\d+)/([0-9a-f-]+)"
-)
+_MOVIE_RE = re.compile(r"/watch-online/movie/([^/]+)/(\d+)/([0-9a-f-]+)")
 
 # Pattern to extract image UUID from Peacock page JSON near an episode UUID
-# The page has JSON like: {"slug":".../{episode_uuid}","images":{"landscape":"https://imageservice.../uuid/{image_uuid}/..."}}
+# The page has episode slugs beside image-service landscape URLs.
 _IMAGE_UUID_RE = re.compile(
     r'"uuid/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/'
 )
+
+
+class _CatalogClient:
+    """Resolve current Peacock assets by their MRP content identifier."""
+
+    def __init__(self) -> None:
+        self._cache: Dict[str, ContentResult] = {}
+
+    async def lookup(self, content_identifier: str, client_session):
+        """Look up one providerVariantId in Peacock's public catalog."""
+        if content_identifier in self._cache:
+            return self._cache[content_identifier]
+
+        url = _CATALOG_VARIANT_URL.format(content_identifier=content_identifier)
+        try:
+            async with client_session.get(url, headers=_CATALOG_HEADERS) as resp:
+                if resp.status != 200:
+                    _LOGGER.debug("Catalog lookup %s returned %d", url, resp.status)
+                    return None
+                data = await resp.json(content_type=None)
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.debug("Failed Peacock catalog lookup %s: %s", url, ex)
+            return None
+
+        attributes = data.get("attributes")
+        if not isinstance(attributes, dict):
+            return None
+
+        artwork_url = None
+        images = attributes.get("images")
+        if isinstance(images, list):
+            for image_type in ("landscape", "scene169"):
+                artwork_url = next(
+                    (
+                        image.get("url")
+                        for image in images
+                        if isinstance(image, dict)
+                        and image.get("type") == image_type
+                        and isinstance(image.get("url"), str)
+                    ),
+                    None,
+                )
+                if artwork_url:
+                    break
+
+        slug = attributes.get("slug")
+        slug_match = re.search(r"^/tv/([^/]+)/", slug or "")
+        result = ContentResult(
+            series_name=attributes.get("seriesName"),
+            season_number=attributes.get("seasonNumber"),
+            episode_number=attributes.get("episodeNumber"),
+            artwork_url=artwork_url,
+            show_slug=slug_match.group(1) if slug_match else None,
+        )
+        self._cache[content_identifier] = result
+        return result
 
 
 class _SitemapIndex:
@@ -81,6 +152,7 @@ class _SitemapIndex:
 
     @property
     def is_loaded(self) -> bool:
+        """Return whether the sitemap index has been loaded."""
         return self._loaded
 
     async def load(self, client_session) -> None:
@@ -103,12 +175,16 @@ class _SitemapIndex:
                             continue
                         data = await resp.read()
                     self._parse_sitemap(data)
-                    _LOGGER.debug("Loaded sitemap %s (%d entries)", url, len(self._cache))
+                    _LOGGER.debug(
+                        "Loaded sitemap %s (%d entries)", url, len(self._cache)
+                    )
                 except Exception as ex:  # pylint: disable=broad-except
                     _LOGGER.debug("Failed to load sitemap %s: %s", url, ex)
 
             self._loaded = True
-            _LOGGER.debug("Peacock sitemap index loaded: %d total entries", len(self._cache))
+            _LOGGER.debug(
+                "Peacock sitemap index loaded: %d total entries", len(self._cache)
+            )
 
     def _parse_sitemap(self, xml_data: bytes) -> None:
         """Parse a sitemap XML and add entries to the cache."""
@@ -181,6 +257,10 @@ class _SitemapIndex:
             return result.show_slug
         return None
 
+    def episode_uuids(self, show_slug: str) -> set:
+        """Return known episode identifiers for a show."""
+        return self._show_episodes.get(show_slug, set())
+
 
 class _ArtworkCache:
     """Cache of episode UUID -> artwork URL, populated from show pages."""
@@ -250,12 +330,12 @@ class _ArtworkCache:
 
                 # Search within a window around the episode UUID for image URLs
                 # The image data is typically within a few thousand chars
-                window = script[max(0, idx - 3000):idx + 3000]
+                window = script[max(0, idx - 3000) : idx + 3000]
 
                 # Find "landscape" image URL which is the main show image
-                # Pattern: "landscape":"https://imageservice.disco.peacocktv.com/uuid/{uuid}/LAND_16_9?..."
                 landscape_match = re.search(
-                    r'"landscape":"(https://imageservice\.disco\.peacocktv\.com/uuid/[0-9a-f-]+/LAND_16_9[^"]*)"',
+                    r'"landscape":"(https://imageservice\.disco\.peacocktv\.com/'
+                    r'uuid/[0-9a-f-]+/LAND_16_9[^"]*)"',
                     window,
                 )
                 if landscape_match:
@@ -285,6 +365,7 @@ class PeacockResolver(ContentResolver):
     """
 
     def __init__(self, client_session=None) -> None:
+        self._catalog = _CatalogClient()
         self._index = _SitemapIndex()
         self._artwork = _ArtworkCache()
         self._client_session = client_session
@@ -299,10 +380,15 @@ class PeacockResolver(ContentResolver):
 
     async def resolve(self, content_identifier: str) -> Optional[ContentResult]:
         """Look up metadata and artwork for a Peacock contentIdentifier."""
+        if self._client_session is None:
+            _LOGGER.debug("Peacock resolver has no client session")
+            return None
+
+        result = await self._catalog.lookup(content_identifier, self._client_session)
+        if result is not None:
+            return result
+
         if not self._index.is_loaded:
-            if self._client_session is None:
-                _LOGGER.debug("Peacock resolver has no client session")
-                return None
             await self._index.load(self._client_session)
 
         result = self._index.lookup(content_identifier)
@@ -312,7 +398,7 @@ class PeacockResolver(ContentResolver):
         # Enrich with artwork URL if not already cached
         if result.artwork_url is None and result.show_slug and self._client_session:
             show_slug = result.show_slug
-            episode_uuids = self._index._show_episodes.get(show_slug, set())
+            episode_uuids = self._index.episode_uuids(show_slug)
             await self._artwork.load_show(
                 show_slug, self._client_session, episode_uuids
             )
