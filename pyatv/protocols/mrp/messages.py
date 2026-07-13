@@ -81,7 +81,7 @@ def crypto_pairing(pairing_data, is_pairing=False):
 
 def client_updates_config(
     artwork=True,
-    now_playing=False,
+    now_playing=True,
     volume=True,
     keyboard=True,
     output_device_updates=True,

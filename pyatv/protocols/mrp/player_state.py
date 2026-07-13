@@ -246,11 +246,47 @@ class PlayerStateManager:
             return self._active_client.active_player
         return PlayerState(Client(pb.NowPlayingClient()), pb.NowPlayingPlayer())
 
+    def _playing_has_content(self) -> bool:
+        """Check if active client has content with metadata."""
+        if self._active_client is None:
+            return False
+        _p = self._active_client.active_player
+        return _p.metadata is not None and _p.playback_state in (
+            pb.PlaybackState.Playing,
+            pb.PlaybackState.Paused,
+        )
+
     async def _handle_set_state(self, message):
         setstate = pb.extract_inner(message)
 
         player = self.get_player(setstate.playerPath)
         player.handle_set_state(setstate)
+
+        # tvOS 26.5: infer active client when SET_NOW_PLAYING_CLIENT is
+        # not sent. Prefer clients with actual content (Playing/Paused +
+        # metadata). If the current active client has no content but this
+        # one does, switch to it.
+        if self._active_client is None or (
+            self._active_client is not None
+            and not self._playing_has_content()
+        ):
+            _client = self.get_client(setstate.playerPath.client)
+            if setstate.HasField("playbackState"):
+                _ps = setstate.playbackState
+                _has_content = (
+                    player.metadata is not None
+                    and _ps in (pb.PlaybackState.Playing, pb.PlaybackState.Paused)
+                )
+                if _has_content or (
+                    _ps != pb.PlaybackState.Stopped and self._active_client is None
+                ):
+                    self._active_client = _client
+                    _LOGGER.debug(
+                        "Inferred active client: %s (state=%s, content=%s)",
+                        _client.bundle_identifier,
+                        _ps,
+                        _has_content,
+                    )
 
         await self._state_updated(player=player)
 

@@ -160,6 +160,13 @@ def build_playing_instance(  # pylint: disable=too-many-locals
 ) -> Playing:
     """Build a Playing instance from play state."""
 
+    # tvOS 26.5: decode nowPlayingInfoData bplist for missing metadata
+    # fields (e.g. seriesName, seasonNumber, episodeNumber) that some
+    # apps put in the NSKeyedArchive instead of structured protobuf fields.
+    from pyatv.protocols.mrp.npid_decoder import enrich_metadata
+
+    enrich_metadata(state.metadata)
+
     def media_type() -> MediaType:
         """Type of media is currently playing, e.g. video, music."""
         if state.metadata:
@@ -726,6 +733,16 @@ class MrpPushUpdater(AbstractPushUpdater):
 
         self.psm.listener = self
         asyncio.ensure_future(self.state_updated())
+
+        # tvOS 26.5 fallback: poll every 15s since push updates may be
+        # unreliable when SET_NOW_PLAYING_CLIENT is not sent.
+        async def _poll_loop():
+            while self.active:
+                await asyncio.sleep(15)
+                if self.active:
+                    await self.state_updated()
+
+        asyncio.ensure_future(_poll_loop())
 
     def stop(self):
         """No longer forward updates to listener."""
